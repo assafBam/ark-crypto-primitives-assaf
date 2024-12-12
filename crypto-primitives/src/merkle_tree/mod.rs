@@ -463,19 +463,10 @@ impl<P: Config> MerkleTree<P> {
             #[cfg(feature = "parallel")] let chunks = non_leaf_nodes[start_index..upper_bound].par_chunks_mut(chunk_size);
             chunks
                 .enumerate()
-                .try_for_each(|(i, chunk)| {
-                    // `left_child(current_index)` and `right_child(current_index) returns the position of
-                    // leaf in the whole tree (represented as a list in level order). We need to shift it
-                    // by `-upper_bound` to get the index in `leaf_nodes` list.
-
-                    // similarly, we need to rescale i by start_index
-                    // to get the index outside the slice and in the level-ordered list of nodes
-                    
-                    //for each chunk, compute the hash of each node
-                    chunk.iter_mut()
-                        .enumerate()
-                        .try_for_each(|(inner_index, n)| {
-                            let current_index = i + start_index + inner_index;
+                .try_for_each(|(i, chunk)| -> Result<(), crate::Error> {
+                    chunk.iter_mut().enumerate().try_for_each(
+                        |(inner_index, n)| -> Result<(), crate::Error> {
+                            let current_index = i * chunk_size + inner_index + start_index;
                             let left_leaf_index = left_child(current_index) - upper_bound;
                             let right_leaf_index = right_child(current_index) - upper_bound;
 
@@ -489,8 +480,45 @@ impl<P: Config> MerkleTree<P> {
                         )?,
                     )?;
                     Ok::<(), crate::Error>(())
-                })?;
-            Ok::<(), crate::Error>(())
+                        },
+                    )?;
+                    /* 
+                    //TODO: $$$ compute all other layers
+                    // Compute the hash values for the remaining layers in this chunk
+                    let mut last_layer_start_index = i * chunk_size + start_index;
+                    let mut last_layer_last_index = (i + 1) * chunk_size + start_index - 1;
+                    for _layer in 1..(n_layers_single_thread - 1) {
+                        // compute start index using the ancestor indices of start_index
+                        let start_index = match parent(last_layer_start_index) {
+                            Some(idx) => idx,
+                            None => return Ok(()), // Skip if we've reached the root
+                        };
+                        let stop_index = match parent(last_layer_last_index) {
+                            Some(idx) => idx + 1,
+                            None => return Ok(()), // Skip if we've reached the root
+                        };
+                        let upper_bound = left_child(start_index);
+                        non_leaf_nodes[start_index..stop_index]
+                            .iter_mut()
+                            .enumerate()
+                            .try_for_each(|(current_index, n)| -> Result<(), crate::Error> {
+                                let current_index = current_index + start_index;
+                                let left_leaf_index = left_child(current_index) - upper_bound;
+                                let right_leaf_index = right_child(current_index) - upper_bound;
+
+                                // need for unwrap as Box<Error> does not implement trait Send
+                                *n = P::TwoToOneHash::compress(
+                                    two_to_one_hash_param,
+                                    non_leaf_nodes[left_leaf_index].clone(),
+                                    non_leaf_nodes[right_leaf_index].clone(),
+                                )?;
+                                Ok::<_, crate::Error>(())
+                            })?;
+                        last_layer_start_index = start_index;
+                        last_layer_last_index = stop_index - 1;
+                    }
+*/
+                    Ok::<(), crate::Error>(())
             })?;
         }
 

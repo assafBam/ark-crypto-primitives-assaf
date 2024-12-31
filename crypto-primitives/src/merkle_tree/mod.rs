@@ -453,7 +453,7 @@ impl<P: Config> MerkleTree<P> {
         // compute the hash values for the non-leaf bottom layer
         //TODO: $$$ maybe change this to do N layers?
         {
-            let n_layers_single_thread = 3;
+            let n_layers_single_thread = 10;
             let chunk_size = 1 << (n_layers_single_thread - 1);
             let start_index = level_indices.pop().unwrap();
             let upper_bound = left_child(start_index);

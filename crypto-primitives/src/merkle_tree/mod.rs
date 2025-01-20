@@ -21,7 +21,7 @@ use rayon::prelude::*;
 
 use lazy_static::lazy_static;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use crate::merkle_tree::time::{mt_start_timer, mt_stop_timer};
+use time::{mt_start_timer, mt_stop_timer};
 
 #[cfg(feature = "r1cs")]
 pub mod constraints;

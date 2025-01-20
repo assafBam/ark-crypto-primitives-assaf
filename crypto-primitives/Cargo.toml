@@ -36,6 +36,9 @@ derivative = { version = "2.0", features = ["use_core"] }
 tracing = { version = "0.1", default-features = false, features = [ "attributes" ], optional = true }
 hashbrown = { version = "0.14", default-features = false, features = ["inline-more", "allocator-api2"], optional = true  }
 
+lazy_static = { version ="1.4" }
+lockfree = { version ="0.5" }
+
 [features]
 default = ["std"]
 std = [ "ark-ff/std", "ark-ec/std", "ark-std/std", "ark-relations/std" ]

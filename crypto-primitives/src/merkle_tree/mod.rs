@@ -1,5 +1,5 @@
 #![allow(clippy::needless_range_loop)]
-
+pub mod time;
 /// Defines a trait to chain two types of CRHs.
 use crate::{
     crh::{CRHScheme, TwoToOneCRHScheme},
@@ -18,6 +18,10 @@ use ark_std::{
 use hashbrown::HashMap;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
+
+use lazy_static::lazy_static;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use crate::merkle_tree::time::{mt_start_timer, mt_stop_timer};
 
 #[cfg(feature = "r1cs")]
 pub mod constraints;
@@ -42,6 +46,26 @@ type DefaultHasher = ahash::AHasher;
     target_has_atomic = "ptr"
 )))]
 type DefaultHasher = fnv::FnvHasher;
+
+// store the number of layers to be computed by a single thread during the calculatio of the merkle tree
+lazy_static! {
+    static ref NUMBER_OF_LAYERS_SINGLE_THREAD: AtomicUsize = AtomicUsize::new(0);
+}
+
+pub fn set_number_of_layers_single_trhead(n_layers: usize) {
+    NUMBER_OF_LAYERS_SINGLE_THREAD.store(n_layers, Ordering::SeqCst);
+}
+
+fn get_number_of_layers_single_trhead()-> usize{
+    const DEFAULT_NUMBER_OF_LAYERS_SINGLE_THREAD:usize = 10;
+    let result = NUMBER_OF_LAYERS_SINGLE_THREAD.load(Ordering::SeqCst);
+    if result > 0 {
+        result
+    }
+    else{
+        DEFAULT_NUMBER_OF_LAYERS_SINGLE_THREAD
+    }
+}
 
 /// Convert the hash digest in different layers by converting previous layer's output to
 /// `TargetType`, which is a `Borrow` to next layer's input.
@@ -426,103 +450,109 @@ impl<P: Config> MerkleTree<P> {
         two_to_one_hash_param: &TwoToOneParam<P>,
         leaf_digests: Vec<P::LeafDigest>,
     ) -> Result<Self, crate::Error> {
-        let leaf_nodes_size = leaf_digests.len();
-        assert!(
-            leaf_nodes_size.is_power_of_two() && leaf_nodes_size > 1,
-            "`leaves.len() should be power of two and greater than one"
-        );
-        let non_leaf_nodes_size = leaf_nodes_size - 1;
 
-        let tree_height = tree_height(leaf_nodes_size);
+        mt_start_timer();
+        let result = {
+            let leaf_nodes_size = leaf_digests.len();
+            assert!(
+                leaf_nodes_size.is_power_of_two() && leaf_nodes_size > 1,
+                "`leaves.len() should be power of two and greater than one"
+            );
+            let non_leaf_nodes_size = leaf_nodes_size - 1;
 
-        let hash_of_empty: P::InnerDigest = P::InnerDigest::default();
+            let tree_height = tree_height(leaf_nodes_size);
 
-        // initialize the merkle tree as array of nodes in level order
-        let mut non_leaf_nodes: Vec<P::InnerDigest> = cfg_into_iter!(0..non_leaf_nodes_size)
-            .map(|_| hash_of_empty.clone())
-            .collect();
+            let hash_of_empty: P::InnerDigest = P::InnerDigest::default();
 
-        // Compute the starting indices for each non-leaf level of the tree
-        let mut index = 0;
-        let mut level_indices = Vec::with_capacity(tree_height - 1);
-        for _ in 0..(tree_height - 1) {
-            level_indices.push(index);
-            index = left_child(index);
-        }
+            // initialize the merkle tree as array of nodes in level order
+            let mut non_leaf_nodes: Vec<P::InnerDigest> = cfg_into_iter!(0..non_leaf_nodes_size)
+                .map(|_| hash_of_empty.clone())
+                .collect();
 
-        // compute the hash values for the non-leaf bottom layer
-        {
-            let n_layers_single_thread = 10;
-            let chunk_size = 1 << (n_layers_single_thread - 1);
-            let start_index = level_indices.pop().unwrap();
-            let upper_bound = left_child(start_index);
+            // Compute the starting indices for each non-leaf level of the tree
+            let mut index = 0;
+            let mut level_indices = Vec::with_capacity(tree_height - 1);
+            for _ in 0..(tree_height - 1) {
+                level_indices.push(index);
+                index = left_child(index);
+            }
 
-            //compute the chunks of the bottom layer
-            #[cfg(not(feature = "parallel"))] let chunks = non_leaf_nodes[start_index..upper_bound].chunks_mut(chunk_size);
-            #[cfg(feature = "parallel")] let chunks = non_leaf_nodes[start_index..upper_bound].par_chunks_mut(chunk_size);
-            chunks
-                .enumerate()
-                .try_for_each(|(i, chunk)| -> Result<(), crate::Error> {
-                    chunk.iter_mut().enumerate().try_for_each(
-                        |(inner_index, n)| -> Result<(), crate::Error> {
-                            let current_index = i * chunk_size + inner_index + start_index;
-                            let left_leaf_index = left_child(current_index) - upper_bound;
-                            let right_leaf_index = right_child(current_index) - upper_bound;
+            // compute the hash values for the non-leaf bottom layer
+            {
+                let n_layers_single_thread = get_number_of_layers_single_trhead();
+                let chunk_size = 1 << (n_layers_single_thread - 1);
+                let start_index = level_indices.pop().unwrap();
+                let upper_bound = left_child(start_index);
 
-                            *n = P::TwoToOneHash::evaluate(
-                                two_to_one_hash_param,
-                                P::LeafInnerDigestConverter::convert(
-                            leaf_digests[left_leaf_index].clone(),
-                        )?,
-                        P::LeafInnerDigestConverter::convert(
-                            leaf_digests[right_leaf_index].clone(),
-                        )?,
-                    )?;
+                //compute the chunks of the bottom layer
+                #[cfg(not(feature = "parallel"))] let chunks = non_leaf_nodes[start_index..upper_bound].chunks_mut(chunk_size);
+                #[cfg(feature = "parallel")] let chunks = non_leaf_nodes[start_index..upper_bound].par_chunks_mut(chunk_size);
+                chunks
+                    .enumerate()
+                    .try_for_each(|(i, chunk)| -> Result<(), crate::Error> {
+                        chunk.iter_mut().enumerate().try_for_each(
+                            |(inner_index, n)| -> Result<(), crate::Error> {
+                                let current_index = i * chunk_size + inner_index + start_index;
+                                let left_leaf_index = left_child(current_index) - upper_bound;
+                                let right_leaf_index = right_child(current_index) - upper_bound;
+
+                                *n = P::TwoToOneHash::evaluate(
+                                    two_to_one_hash_param,
+                                    P::LeafInnerDigestConverter::convert(
+                                leaf_digests[left_leaf_index].clone(),
+                            )?,
+                            P::LeafInnerDigestConverter::convert(
+                                leaf_digests[right_leaf_index].clone(),
+                            )?,
+                        )?;
+                        Ok::<(), crate::Error>(())
+                            },
+                        )?;
                     Ok::<(), crate::Error>(())
-                        },
-                    )?;
-                Ok::<(), crate::Error>(())
-            })?;
-        }
-
-        // compute the hash values for nodes in every other layer in the tree
-        level_indices.reverse();
-        for &start_index in &level_indices {
-            // The layer beginning `start_index` ends at `upper_bound` (exclusive).
-            let upper_bound = left_child(start_index);
-
-            let (nodes_at_level, nodes_at_prev_level) =
-                non_leaf_nodes[..].split_at_mut(upper_bound);
-            // Iterate over the nodes at the current level, and compute the hash of each node
-            cfg_iter_mut!(nodes_at_level[start_index..])
-                .enumerate()
-                .try_for_each(|(i, n)| {
-                    // `left_child(current_index)` and `right_child(current_index) returns the position of
-                    // leaf in the whole tree (represented as a list in level order). We need to shift it
-                    // by `-upper_bound` to get the index in `leaf_nodes` list.
-
-                    // similarly, we need to rescale i by start_index
-                    // to get the index outside the slice and in the level-ordered list of nodes
-                    let current_index = i + start_index;
-                    let left_leaf_index = left_child(current_index) - upper_bound;
-                    let right_leaf_index = right_child(current_index) - upper_bound;
-
-                    // need for unwrap as Box<Error> does not implement trait Send
-                    *n = P::TwoToOneHash::compress(
-                        two_to_one_hash_param,
-                        nodes_at_prev_level[left_leaf_index].clone(),
-                        nodes_at_prev_level[right_leaf_index].clone(),
-                    )?;
-                    Ok::<_, crate::Error>(())
                 })?;
-        }
-        Ok(MerkleTree {
-            leaf_nodes: leaf_digests,
-            non_leaf_nodes,
-            height: tree_height,
-            leaf_hash_param: leaf_hash_param.clone(),
-            two_to_one_hash_param: two_to_one_hash_param.clone(),
-        })
+            }
+
+            // compute the hash values for nodes in every other layer in the tree
+            level_indices.reverse();
+            for &start_index in &level_indices {
+                // The layer beginning `start_index` ends at `upper_bound` (exclusive).
+                let upper_bound = left_child(start_index);
+
+                let (nodes_at_level, nodes_at_prev_level) =
+                    non_leaf_nodes[..].split_at_mut(upper_bound);
+                // Iterate over the nodes at the current level, and compute the hash of each node
+                cfg_iter_mut!(nodes_at_level[start_index..])
+                    .enumerate()
+                    .try_for_each(|(i, n)| {
+                        // `left_child(current_index)` and `right_child(current_index) returns the position of
+                        // leaf in the whole tree (represented as a list in level order). We need to shift it
+                        // by `-upper_bound` to get the index in `leaf_nodes` list.
+
+                        // similarly, we need to rescale i by start_index
+                        // to get the index outside the slice and in the level-ordered list of nodes
+                        let current_index = i + start_index;
+                        let left_leaf_index = left_child(current_index) - upper_bound;
+                        let right_leaf_index = right_child(current_index) - upper_bound;
+
+                        // need for unwrap as Box<Error> does not implement trait Send
+                        *n = P::TwoToOneHash::compress(
+                            two_to_one_hash_param,
+                            nodes_at_prev_level[left_leaf_index].clone(),
+                            nodes_at_prev_level[right_leaf_index].clone(),
+                        )?;
+                        Ok::<_, crate::Error>(())
+                    })?;
+            }
+            Ok(MerkleTree {
+                leaf_nodes: leaf_digests,
+                non_leaf_nodes,
+                height: tree_height,
+                leaf_hash_param: leaf_hash_param.clone(),
+                two_to_one_hash_param: two_to_one_hash_param.clone(),
+            })
+        };
+        mt_stop_timer();
+        result
     }
 
     /// Returns the root of the Merkle tree.
